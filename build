@@ -1,0 +1,230 @@
+#!/bin/bash
+
+# EzRe build script
+version="1.0"
+program="arll"
+
+release_name="$program-v$version"
+release_files="$program *.md"
+
+gen_standalone_send_lua()
+{
+	# Create standalone send_lua.py for Mac:
+	# Set up virtual environment in temp.
+	virtual_env=$tmp/env
+	python3 -m venv $virtual_env
+	source $virtual_env/bin/activate
+
+	# Install in virtual environment.
+	pip install --upgrade pip
+	pip install pyinstaller
+	# Nothing can be signed when going into pyinstaller, but these are already ad hoc from Macports. Ugly hack, but this has wasted too much of my time.
+	cp -v osx.py.modified $virtual_env/lib/python3.14/site-packages/PyInstaller/utils/osx.py
+
+# Spec file.
+cat << EOF > $tmp/send_lua.spec
+# -*- mode: python ; coding: utf-8 -*-
+
+a = Analysis(
+	[ os.path.join(os.getcwd(), 'remote_lua_loader/payloads/send_lua.py') ],
+    binaries=[],
+    datas=[],
+    noarchive=False,
+    runtime_hooks=[], 
+    codesign_identity='',      
+    codesign_options=[],        
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='send_lua',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    target_arch='x86_64',       
+    #codesign_identity='',     
+    codesign_options=[],       
+)
+EOF
+	
+	# Move bincache to deletable tmp. Pyinstaller keeps this around for dumb reasons.
+	mkdir $tmp/cache
+	export PYINSTALLER_CONFIG_DIR=$tmp/cache
+	pyinstaller \
+		--workpath $virtual_env/build \
+		--distpath $virtual_env \
+		$tmp/send_lua.spec
+
+	# Close virtual enviorement.
+	deactivate
+}
+
+# When this script exits, automatically delete the temp directory.
+cleanup()
+{
+    if [[ -e "$tmp" ]]; then
+        rm -r "$tmp"
+    fi
+}
+trap cleanup EXIT
+
+# Put temp directory in /var/tmp to guarantee enough space.
+if [[ "$(uname)" == "Darwin" ]]; then
+    # BSD mktemp syntax.
+    tmp=$(mktemp -d /var/tmp/send_lua.XXXXXX)
+else
+    # GNU mktemp syntax.
+    tmp=$(mktemp -d --tmpdir=/var/tmp send_lua.XXXXXX)
+fi
+
+if [ "$1" == "deps" ]; then
+    echo "Info: root privileges are required to install build dependencies."
+
+	if [ "$(uname)" = "Darwin" ]; then
+		echo "Mac OS detected."
+
+		if command -v port > /dev/null; then
+			echo "Using MacPorts"
+			sudo port -N selfupdate
+			# Upgrade anything outdated to latest.
+			sudo port -N upgrade outdated
+			sudo port -N install curl python314 nmap
+			# Change as needed.
+        	sudo port select --set python3 python314
+		else
+			echo "Error: MacPorts is not installed."
+			exit 1
+		fi
+	
+    elif [ "$(uname)" = "Linux" ]; then
+		echo "Linux detected."
+	
+    	if command -v dnf > /dev/null; then
+			echo "Using dnf"
+			# Ncat is default nc.
+			sudo dnf -y install dpkg-dev rpmdevtools python3 curl
+		elif command -v apt > /dev/null; then
+			echo "Using apt"
+			sudo apt install --yes dpkg-dev rpm python3 python3-pip python3-venv curl
+		else
+			echo "MacPorts, DNF, and APT package managers were not found. The make deps rule requires one of these package managers to automatically install all required build dependencies."
+		fi
+    fi
+fi
+
+cd "$(dirname "$0")"
+
+rm -rf "$release_name"* *.zip *.deb *.rpm
+
+if [ "$1" == "clean" ]; then
+    exit 0
+fi
+
+if sed --version >/dev/null 2>&1; then
+    echo "Info: using GNU sed"
+    bsd_sed=false
+else
+    echo "Info: using BSD sed"
+    bsd_sed=true
+fi
+
+# Update version in $program.
+if [ "$bsd_sed" == "true" ]; then
+    sed -i '' -E "s|^version=.*|version=$version|" $program
+else
+    sed -i'' -E "s|^version=.*|version=$version|" $program
+fi
+
+# Update version in control.
+if [ "$bsd_sed" == "true" ]; then
+    sed -i '' -E "s|^Version.*|Version: $version|" control
+else
+    sed -i'' -E "s|^Version.*|Version: $version|" control
+fi
+
+# Update version in ezre.spec.
+if [ "$bsd_sed" == "true" ]; then
+    sed -i '' -E "s|^Version.*|Version: v$version|" ezre.spec
+else
+    sed -i'' -E "s|^Version.*|Version: v$version|" ezre.spec
+fi
+
+if [[ "$(uname)" == "Linux" ]]; then
+	# Deb.
+	mkdir -p "$release_name"/usr/bin
+	mkdir -p "$release_name"/DEBIAN
+	cp control "$release_name"/DEBIAN
+	cp "$program" "$release_name"/usr/bin
+	dpkg-deb --build "$release_name"
+	rm -rf "$release_name"
+
+	# RPM.
+	rm -rf rpm-tmp
+	mkdir -p rpm-tmp/RPMS rpm-tmp/SPECS rpm-tmp/SOURCES rpm-tmp/BUILD
+	cp ezre.spec rpm-tmp/SPECS/ezre.spec
+	cp $program rpm-tmp/SOURCES
+	rpmbuild -bb --target noarch rpm-tmp/SPECS/ezre.spec --define "_topdir $PWD/rpm-tmp" --define "_tmppath $PWD/rpm-tmp"
+	mv rpm-tmp/RPMS/noarch/*.rpm .
+	rm -rf rpm-tmp
+
+fi
+
+# Portable releases.
+mkdir "$release_name"
+cp -r ${release_files} "$release_name"
+mkdir "$release_name"/bin
+# Copy latest cacert.pem.
+curl -L https://curl.se/ca/cacert.pem -o "$release_name"/bin/cacert.pem
+
+# Change to portable=true in $program for zip release.
+if [ "$bsd_sed" == "true" ]; then
+    sed -i '' -E "s|^portable=.*|portable=true|" "$release_name"/$program
+else
+    sed -i'' -E "s|^portable=.*|portable=true|" "$release_name"/$program
+fi
+
+if [[ "$(uname)" == "Linux" ]]; then
+	cp -r "$release_name" "$release_name"-linux-x86_64-portable
+
+	# Get Linux portable cURL.
+	pled/pled curl "$release_name"-linux-x86_64-portable/bin
+
+	# Get netcat portable.
+	pled/pled ncat "$release_name"-linux-x86_64-portable/bin
+
+	# Standalone send_lua binary.
+	gen_standalone_send_lua
+
+	# Copy standalone send_luato portable release
+	mv $virtual_env/send_lua "$release_name"-linux-x86_64-portable/bin
+	# Copy p2jb.lua over.
+	cp remote_lua_loader/payloads/p2jb.lua "$release_name"-linux-x86_64-portable/bin
+
+	chmod -R 777 "$release_name"-linux-x86_64-portable
+	zip -r "$release_name"-linux-x86_64-portable.zip "$release_name"-linux-x86_64-portable
+elif [[ "$(uname)" == "Darwin" ]]; then
+	mv "$release_name" "$release_name"-mac-x86_64-portable
+
+	# Get Mac portable cURL.
+	portable-mac-directory/pmacd curl "$release_name"-mac-x86_64-portable/bin
+
+	# Get Mac portable ncat.
+	portable-mac-directory/pmacd ncat "$release_name"-mac-x86_64-portable/bin
+
+	# Standalone send_lua binary.
+	gen_standalone_send_lua
+
+	# Copy standalone send_lua to portable release
+	mv $virtual_env/send_lua "$release_name"-mac-x86_64-portable/bin
+	# Copy p2jb.lua over.
+	cp remote_lua_loader/payloads/p2jb.lua "$release_name"-mac-x86_64-portable/bin
+
+	chmod -R 777 "$release_name"-mac-x86_64-portable
+	zip -r "$release_name"-mac-x86_64-portable.zip "$release_name"-mac-x86_64-portable
+fi

@@ -1,0 +1,7 @@
+Package: arll
+Version: 1.0
+Maintainer: Alex Free
+Architecture: all
+Homepage: https://github.com/alex-free/automatic-lua-loader
+Description: Send the remote lua loader exploit and latest payloads in one command from your computer.
+Depends: curl, python3, python3-pip, python3-venv, ncat

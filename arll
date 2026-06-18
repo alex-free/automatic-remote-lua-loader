@@ -1,0 +1,232 @@
+#!/bin/bash
+
+version=1.0
+portable=false
+remote_lua_loader=https://github.com/n0llptr/remote_lua_loader/archive/refs/heads/main.zip
+update=false
+
+# When this script exits, automatically delete the temp directory.
+cleanup()
+{
+    if [[ -e "$tmp" ]]; then
+        rm -r "$tmp"
+    fi
+}
+trap cleanup EXIT
+
+# Put temp directory in /var/tmp to guarantee enough space.
+if [[ "$(uname)" == "Darwin" ]]; then
+    # BSD mktemp syntax.
+    tmp=$(mktemp -d /var/tmp/pmrla.XXXXXX)
+else
+    # GNU mktemp syntax.
+    tmp=$(mktemp -d --tmpdir=/var/tmp pmrla.XXXXXX)
+fi
+
+# Determine sed syntax.
+if sed --version >/dev/null 2>&1; then
+    bsd_sed=false
+else
+    bsd_sed=true
+fi
+
+# $1 payload url.
+send_payload()
+{
+    payload=$(basename "$1")
+
+    if ! [[ -f "$payloads_path"/$payload || "$update" == "true" ]]; then
+        echo "Downloading $payload from $1..."
+        
+        if [[ "$portable" == "true" ]]; then
+            curl --cacert "$real_portable_folder"/bin/cacert.pem -L "$1" -o $tmp/$payload
+        else
+            curl -L "$1" -o $tmp/$payload
+        fi
+        
+        # Make sure we don't download a 404 html result.
+        if ! file "$tmp/$payload" 2>/dev/null | grep -q "ELF 64-bit"; then
+            echo "Error: payload download failed. Existing $payload has not been modified."
+            # Move to next payload if we still have more.
+            return 1
+        else
+            cp -v $tmp/$payload "$payloads_path"
+            echo "$payload has been updated"
+        fi
+    else
+        echo "Info: using existing $payload."
+    fi
+
+    echo "Info: waiting $delay seconds before sending $payload..."
+    sleep $delay
+
+    if ! ncat --send-only $ps5 9021 < "$payloads_path"/$payload; then
+        echo "Error: netcat payload send failed."
+        exit 1
+    fi
+
+    echo "$payload sent!"
+}
+
+echo -e "Automatic Remote Lua loader (ARLL) $version\nBy Alex Free\nhttps://github.com/alex-free/automatic-remote-lua-loader\n"
+
+if [[ "$#" -gt 1 ]]; then
+    echo "Usage:
+        arll       Jailbreak, download latest payloads only if they don't exist, send payloads.
+
+        arll -u       Jailbreak, update all payloads to latest, send latest payloads.
+
+        arll -r       Reset. Delete saved config and downloaded payloads.
+"
+    exit 0
+fi
+
+if [[ "$1" == "-u" ]]; then
+    echo "Info: downloading latest payloads."
+    update=true
+fi
+
+# Set up arll_data_path for payloads and config to be stored at.
+if [[ "$portable" == "true" ]]; then
+
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # Mac readlink doesn't support resolving symlinks.
+        real_portable_folder="$(dirname "$0")"
+
+    elif [[ "$(uname)" == "Linux" ]]; then
+		echo "Linux detected."
+        # GNU Readlink lets us resolve symlinks with this.
+        real_portable_folder="$(dirname "$(readlink -f "$0")")"
+    else
+        echo "Error: Your OS is not supported by this release."
+        exit 1
+    fi
+
+    # Portable releases are self contained.
+    arll_data_path="$real_portable_folder"
+    # Put portable bins in $PATH.
+    PATH=""$real_portable_folder"/bin${PATH:+:$PATH}"
+    # Prints executables.
+    which curl
+    which netcat
+    which send_lua
+else
+    # XDG standard for package manager installation.
+    arll_data_path=$HOME/.config/automatic-remote-lua-loader
+fi
+
+if [[ "$1" == "-r" ]]; then
+    rm -rf "$arll_data_path"
+    echo "Deleted saved config and downloaded payloads."
+    exit 1
+fi
+
+config="$arll_data_path"/config.txt
+payloads_path="$arll_data_path"/payloads
+
+# Create paths if they doesn't exist.
+mkdir -p "$payloads_path"
+
+# Creat config if it doesn't exist.
+if [[ ! -f "$config" ]]; then
+    echo "No $config file detected, using default config."
+
+    cat << 'EOF' > "$config"
+# Seconds to wait after sending the payload.
+delay=15
+
+# Kernel stuff. MUST BE RAN BEFORE ANY OTHER PAYLOAD IS SENT.
+https://github.com/EchoStretch/kstuff-lite/releases/latest/download/kstuff.elf
+#https://github.com/drakmor/kstuff-lite/releases/latest/download/kstuff.elf
+
+# FTP server for network transfers.
+https://github.com/ps5-payload-dev/ftpsrv/releases/latest/download/ftpsrv-ps5.elf
+
+# Web server for homebrew apps and stuff.
+https://github.com/ps5-payload-dev/websrv/releases/latest/download/websrv-ps5.elf
+
+# ETAHen functionality for i.e. PS5 Explorer.
+https://git.etawen.dev/soniciso/elf-arsenal/raw/branch/main/payloads/lapyjb.elf
+
+# Backup/Homebrew mounter.
+https://github.com/drakmor/ShadowMountPlus/releases/latest/download/shadowmountplus.elf
+
+EOF
+
+fi
+
+# Have what we need in standalone binary for portable.
+if [[ ! -d "$arll_data_path"/remote_lua_loader-main && "$portable" != "true" || "$update" == "true"  && "$portable" != "true" ]]; then
+    rm -rf "$arll_data_path"/remote_lua_loader-main
+    # Have what we need in standalone binary for portable.
+    echo "Downloading remote lua loader.."
+    curl -L $remote_lua_loader -o $tmp/remote-lua-loader.zip
+    rm -rf "$arll_data_path"/remote_lua_loader-main
+    echo "Extracting remote lua loader..."
+    unzip -q $tmp/remote-lua-loader.zip -d "$arll_data_path"
+fi
+
+# Get delay value for timeout.
+delay=$(grep '^delay=' "$config" | cut -d'=' -f2-)
+
+if [ -z "$delay" ]; then
+    echo "Error: could not parse required value 'delay=' in $conf. Make sure it is set in $config."
+    exit 1
+fi
+
+echo "Wait time after sending payload set to $delay seconds."
+
+# Get value for PS5 IP address.
+ps5=$(grep '^ps5=' "$config" | cut -d'=' -f2-)
+
+if [[ -z "$ps5" ]]; then
+
+    # Delete line starting with ps5=<empty value> (if exists). Idea here is if ps5= is empty.
+    if [[ "$bsd_sed" == "true" ]]; then
+        sed -i '' '/^ps5=/d' "$config"
+    else
+        sed -i '/^ps5=/d' "$config"
+    fi
+
+    read -p "Enter PS5 IP address: " ps5_ip_input
+    # Append to config since ps5= was deleted if it existed.
+    echo "ps5="$ps5_ip_input"" >> "$config"
+fi
+
+ps5=$(grep '^ps5=' "$config" | cut -d'=' -f2-)
+echo "Sending exploit and payloads to $ps5"
+
+if [[ "$portable" == "true" ]]; then
+    # Standalone binary in $PATH.
+    while ! send_lua $ps5 9026 "$real_portable_folder"/bin/p2jb.lua; do
+        read -p "Press enter when you are ready to try again"
+    done
+else
+
+# Subshell.
+(cd "$arll_data_path"/remote_lua_loader-main/payloads;
+
+    # Currently this only protects if it can't connect to the server (limitation of remote-lua-loader? Maybe ps2jb.lu can be checked for failure too...).
+    while ! python3 send_lua.py $ps5 9026 p2jb.lua; do
+        read -p "Press enter when you are ready to try again"
+    done
+
+)
+
+fi
+
+# Parse config for payloads to send.
+# Ignore empty lines so user can format how they please.
+# Ignore lines starting with # for comments.
+# Ignore line starting with ps5= since that is the IP address we already know at this point.
+# Ignore line starting with delay= since that is the delay between sending payloads.
+while read -r line; do
+    if [[ -n "$line" && \
+    "$line" != \#* && \
+    "$line" != *"ps5="* && \
+    "$line" != *"delay="* ]]; then
+        send_payload "$line"
+    fi
+done < "$config"
+
+echo "Complete!"

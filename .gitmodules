@@ -1,0 +1,9 @@
+[submodule "pled"]
+	path = pled
+	url = https://github.com/alex-free/pled
+[submodule "portable-mac-directory"]
+	path = portable-mac-directory
+	url = https://github.com/alex-free/portable-mac-directory
+[submodule "remote_lua_loader"]
+	path = remote_lua_loader
+	url = https://github.com/n0llptr/remote_lua_loader
