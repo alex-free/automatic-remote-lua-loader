@@ -12,7 +12,7 @@ Send the remote lua loader exploit and the latest payloads of your choosing in o
 
 * Keeps downloaded payloads for future use.
 
-* Portable self-contained release for Windows/Mac/Linux.
+* Portable self-contained release for Mac and Linux.
 
 * Linux .deb and .rpm package files available. 
 
